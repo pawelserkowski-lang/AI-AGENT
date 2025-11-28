@@ -1,9 +1,0 @@
-__pycache__/
-*.pyc
-.env
-config.json
-dist/
-build/
-*.spec
-.DS_Store
-.idea/
