@@ -1,0 +1,6 @@
+google-generativeai
+pexpect
+pillow
+rich
+duckduckgo-search
+requests
