@@ -1,0 +1,10 @@
+{
+    "temperature": 0.2,
+    "max_tokens": 8192,
+    "use_google_search": true,
+    "stackoverflow": false,
+    "custom_text": "",
+    "auto_save_files": true,
+    "dark_mode": false,
+    "api_key": ""
+}
