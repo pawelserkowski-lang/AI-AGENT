@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 
 from core.database import DatabaseManager
 from core.agent import Agent
+from core.github_client import GitHubFetcher, GitHubFetchError
 from core.logger import KivyLogHandler
 
 # Importy
@@ -31,6 +32,10 @@ def resource_path(relative_path):
     try: base_path = sys._MEIPASS
     except: base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
+
+
+def _parse_priority_override(raw_value: str):
+    return [item.strip() for item in raw_value.split(",") if item.strip()]
 
 # --- KLASY WIDGETÓW DLA KV ---
 class MainLayout(MDBoxLayout): pass
@@ -58,10 +63,16 @@ class DebugDruidApp(MDApp):
     param_temperature = NumericProperty(0.2)
     param_max_tokens = NumericProperty(8192)
     param_auto_save_files = BooleanProperty(True)
-    
+
+    github_repo = StringProperty("")
+    github_branch = StringProperty("main")
+    github_files = StringProperty("")
+    github_token = StringProperty(os.getenv("GITHUB_TOKEN", ""))
+
     # Theme
     is_dark_mode = BooleanProperty(False)
     available_models = ListProperty([]) # Dodano brakującą listę
+    model_priority_families = ListProperty(["gemini-1.5-pro", "gemini-1.5-flash", "gemini-pro"])
 
     # Zmienne wymagane przez UI, choć nieużywane w logice hardlocka (dla kompatybilności)
     current_analysis_model = StringProperty("Wybierz...")
@@ -90,24 +101,103 @@ class DebugDruidApp(MDApp):
         return MainLayout()
 
     def on_start(self):
-        if self.api_key:
-            threading.Thread(target=self.init_agent_model, daemon=True).start()
+        threading.Thread(target=self._bootstrap_and_discover, daemon=True).start()
         Clock.schedule_once(lambda dt: self.refresh_sessions_list(), 0.5)
 
+    def _bootstrap_and_discover(self):
+        """Ensure an API key exists before triggering model discovery."""
+        key_source = self.api_key or os.getenv("API_KEY", "")
+        key_origin = "memory" if self.api_key else ("env" if os.getenv("API_KEY") else "missing")
+        if not key_source:
+            Clock.schedule_once(lambda dt: setattr(self, "current_main_model", "Brak klucza API"), 0)
+            Clock.schedule_once(lambda dt: toast("Podaj klucz API, aby pobrać modele"), 0)
+            logging.warning("Brak klucza API przy starcie aplikacji")
+            return
+
+        # Aktualizuj stan aplikacji tylko, gdy przejmujemy klucz z ENV
+        if not self.api_key and key_source:
+            self.api_key = key_source
+            Clock.schedule_once(lambda dt: setattr(self, "api_key", key_source), 0)
+            self.save_config()
+
+        logging.info(
+            "[BOOT] API key source=%s value=%s",
+            key_origin,
+            self._mask_key(key_source),
+        )
+
+        self.init_agent_model()
+
     def init_agent_model(self):
+        Clock.schedule_once(lambda dt: setattr(self, "current_main_model", "Szukam modelu..."), 0)
         logging.info("Auto-Discovery: Szukam modelu...")
         model = self.agent.discover_best_model(self.api_key)
         if model:
             Clock.schedule_once(lambda dt: setattr(self, 'current_main_model', model), 0)
+            Clock.schedule_once(lambda dt: toast(f"Wykryto model: {model}"), 0)
             logging.info(f"Ustawiono: {model}")
         else:
             Clock.schedule_once(lambda dt: setattr(self, 'current_main_model', "Błąd / Brak"), 0)
+            Clock.schedule_once(lambda dt: toast("Nie znaleziono modelu"), 0)
+            logging.error("[BOOT] Nie udało się wykryć modelu")
 
     def on_stop(self): self.save_config()
 
     def update_api_key(self, text):
         self.api_key = text
         self.save_config()
+        threading.Thread(target=self.init_agent_model, daemon=True).start()
+
+    def fetch_github_files(self):
+        repo = self.github_repo.strip()
+        branch = (self.github_branch or "main").strip() or "main"
+        files = [item.strip() for item in self.github_files.split(",") if item.strip()]
+        if not repo or not files:
+            toast("Podaj repozytorium i listę plików")
+            return
+
+        toast("Pobieram pliki z GitHub...")
+
+        def _worker():
+            fetcher = GitHubFetcher(token=self.github_token.strip() or None)
+            try:
+                contents = fetcher.fetch_files(repo, files, branch)
+            except GitHubFetchError as exc:
+                logging.error("GitHub download failed: %s", exc)
+                Clock.schedule_once(lambda dt: toast(f"Błąd GitHub: {exc}"), 0)
+                return
+            except Exception as exc:  # pragma: no cover - defensive
+                logging.error("Nieoczekiwany błąd GitHub: %s", exc)
+                Clock.schedule_once(lambda dt: toast("Błąd GitHub (szczegóły w logach)"), 0)
+                return
+
+            target_root = os.path.join("github_cache", repo.replace("/", "_"))
+            saved_paths = []
+            for relative_path, text in contents.items():
+                dest_path = os.path.join(target_root, relative_path)
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                with open(dest_path, "w", encoding="utf-8") as file_handle:
+                    file_handle.write(text)
+                saved_paths.append(dest_path)
+            logging.info("[GITHUB] Zapisano %d plików z %s:%s", len(saved_paths), repo, branch)
+
+            def _attach_files(dt):
+                chat_screen = self.root.ids.get("chat_screen")
+                if not chat_screen:
+                    toast("Nie znaleziono widoku czatu")
+                    return
+                for file_path in saved_paths:
+                    chat_screen.add_file_to_panel(file_path)
+                toast(f"Dodano {len(saved_paths)} plików z GitHub")
+
+            Clock.schedule_once(_attach_files, 0)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def refresh_model_discovery(self):
+        """Manually trigger model discovery and surface feedback in the UI."""
+        toast("Odświeżam listę modeli...")
+        Clock.schedule_once(lambda dt: setattr(self, "current_main_model", "Szukam modelu..."), 0)
         threading.Thread(target=self.init_agent_model, daemon=True).start()
 
     def toggle_theme(self, is_dark):
@@ -128,6 +218,7 @@ class DebugDruidApp(MDApp):
         self.save_config()
 
     def load_config(self):
+        env_priority = os.getenv("MODEL_PRIORITY_FAMILIES")
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -139,8 +230,18 @@ class DebugDruidApp(MDApp):
                     self.param_custom_text = data.get("custom_text", "")
                     self.param_auto_save_files = data.get("auto_save_files", True)
                     self.is_dark_mode = data.get("dark_mode", False)
+                    self.model_priority_families = data.get(
+                        "model_priority_families", self.model_priority_families
+                    )
+                    self.github_repo = data.get("github_repo", self.github_repo)
+                    self.github_branch = data.get("github_branch", self.github_branch)
+                    self.github_files = data.get("github_files", self.github_files)
+                    if not self.github_token:
+                        self.github_token = data.get("github_token", "")
                     if not self.api_key: self.api_key = data.get("api_key", "")
             except: pass
+        if env_priority:
+            self.model_priority_families = _parse_priority_override(env_priority)
 
     def save_config(self):
         data = {
@@ -151,7 +252,12 @@ class DebugDruidApp(MDApp):
             "custom_text": self.param_custom_text,
             "auto_save_files": self.param_auto_save_files,
             "dark_mode": self.is_dark_mode,
-            "api_key": self.api_key
+            "api_key": self.api_key,
+            "model_priority_families": list(self.model_priority_families),
+            "github_repo": self.github_repo,
+            "github_branch": self.github_branch,
+            "github_files": self.github_files,
+            "github_token": self.github_token,
         }
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f: json.dump(data, f, indent=4)
@@ -210,3 +316,12 @@ class DebugDruidApp(MDApp):
         self.logs_text += msg + "\n"
 
     def clear_logs(self): self.logs_text = ""
+
+    @staticmethod
+    def _mask_key(key: str) -> str:
+        """Hide the sensitive part of the API key for logging."""
+        if not key:
+            return "<empty>"
+        if len(key) <= 6:
+            return "***"
+        return f"{key[:3]}...{key[-3:]}"
