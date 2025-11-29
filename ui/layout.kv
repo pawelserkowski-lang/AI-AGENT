@@ -1,0 +1,44 @@
+#:import dp kivy.metrics.dp
+
+<MainScreen>:
+    MDBoxLayout:
+        orientation: 'vertical'
+        padding: '10dp'
+        spacing: '10dp'
+
+        # Lista wiadomości
+        MDScrollView:
+            id: scroll_view
+            do_scroll_x: False
+
+            MDList:
+                id: chat_list
+                spacing: '12dp'
+                padding: [0, 0, 0, '20dp']
+
+        # Pasek inputu
+        MDBoxLayout:
+            size_hint_y: None
+            height: '60dp'
+            spacing: '10dp'
+            padding: [0, '5dp', 0, '5dp']
+
+            MDTextField:
+                id: user_input
+                hint_text: 'Napisz wiadomość...'
+                mode: 'rectangle'
+                multiline: False
+                on_text_validate: root.send_message()
+
+            MDIconButton:
+                icon: 'send'
+                theme_text_color: 'Custom'
+                text_color: app.theme_cls.primary_color
+                on_release: root.send_message()
+
+    MDSpinner:
+        id: loading_spinner
+        size_hint: None, None
+        size: dp(30), dp(30)
+        pos_hint: {'center_x': .5, 'center_y': .5}
+        active: False

@@ -1,0 +1,4 @@
+kivy
+kivymd
+ollama
+python-dotenv
